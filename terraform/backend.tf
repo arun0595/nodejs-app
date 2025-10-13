@@ -1,9 +1,8 @@
+#remote backend state configuration
 terraform {
   backend "s3" {
-    bucket         = "my-terraform-state-bucket"      # Replace with your S3 bucket name
-    key            = "ecs-nodejs-app/terraform.tfstate"
-    region         = "us-east-1"
-    dynamodb_table = "terraform-locks"               # Optional: for state locking
-    encrypt        = true
+    bucket = "Arun-terraform-state-bucket"
+    key    = "ecs/hello-world-app/terraform.tfstate"
+    region = "ap-south-1"
   }
 }
