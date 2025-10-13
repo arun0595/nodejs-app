@@ -8,8 +8,15 @@ resource "aws_cloudwatch_log_group" "ecs_log_group" {
   retention_in_days = 14 
 }
 
+resource "aws_ecr_repository" "app_repo" {
+  name                 = var.ecr_repo_name
+  image_tag_mutability = "MUTABLE"
+  image_scanning_configuration { scan_on_push = true }
+}
+
+
 resource "aws_ecs_cluster" "cluster" {
-  name = var.ecs_cluster_name
+  name = "${var.app_name}-cluster"
 }
 
 resource "aws_iam_role" "ecs_task_execution_role" {
@@ -42,12 +49,11 @@ resource "aws_ecs_task_definition" "task" {
   container_definitions = jsonencode([
     {
       name          = var.app_name
-      image         = "567738737859.dkr.ecr.ap-south-1.amazonaws.com/hello-world-app:latest"
+      image         = "${aws_ecr_repository.app_repo.repository_url}:latest"
       essential     = true
       portMappings  = [
         {
           containerPort = 3000
-        #  hostPort      = 3000
         } ]
         logConfiguration = {
           logDriver = "awslogs"
@@ -59,26 +65,6 @@ resource "aws_ecs_task_definition" "task" {
         }
     }
   ])
-}
-
-resource "aws_ecs_service" "service" {
-  name            = var.app_name
-  cluster         = aws_ecs_cluster.cluster.id
-  task_definition = aws_ecs_task_definition.task.arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
-
-  network_configuration {
-    subnets         = var.subnet_ids
-    assign_public_ip = true
-    security_groups = ["sg-098d8e07dc8df4f85"]
-  }
-
-  load_balancer {
-    target_group_arn = aws_lb_target_group.app_target_group.arn
-    container_name   = var.app_name
-    container_port   = 3000
-  }
 }
 
 resource "aws_lb" "app_lb" {
@@ -106,4 +92,26 @@ resource "aws_lb_listener" "app_listener" {
     type             = "forward"
     target_group_arn = aws_lb_target_group.app_target_group.arn
   }
+
+resource "aws_ecs_service" "service" {
+  name            = "${var.app_name}-service"
+  cluster         = aws_ecs_cluster.cluster.id
+  task_definition = aws_ecs_task_definition.task.arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets         = var.subnet_ids
+    assign_public_ip = true
+    security_groups = ["sg-098d8e07dc8df4f85"]
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.app_target_group.arn
+    container_name   = var.app_name
+    container_port   = 3000
+  }
+}
+depends_on = [aws_lb_listener.app_listener]
+
 }
