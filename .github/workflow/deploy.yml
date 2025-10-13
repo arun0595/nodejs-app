@@ -50,7 +50,7 @@ jobs:
       - name: Terraform Apply
         run: terraform apply -auto-approve
         working-directory: ./terraform
-
+#for testing purpose
       - name: Terraform Destroy
         run: terraform destroy -auto-approve
         working-directory: ./terraform
