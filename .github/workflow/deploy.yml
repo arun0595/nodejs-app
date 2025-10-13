@@ -1,4 +1,4 @@
-name: Deploy to ECS
+name: CI/CD Pipeline - ECS Fargate
 
 on:
   push:
@@ -6,51 +6,38 @@ on:
       - main
 
 jobs:
-  build:
+  deploy:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v2
+    - name: Checkout code
+      uses: actions/checkout@v3
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v1
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ap-south-1
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v1
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+    - name: Terraform Init & Apply
+      working-directory: ./terraform
+      run: |
+        terraform init -backend-config="bucket=my-terraform-state-bucket" \
+                       -backend-config="key=ecs-nodejs-app/terraform.tfstate" \
+                       -backend-config="region=ap-south-1"
+        terraform apply -auto-approve
 
-      - name: Log in to Amazon ECR
-        id: ecr-login
-        uses: aws-actions/amazon-ecr-login@v1
-        with:
-          registry-type: 'private'
-          mask-password: true
+    - name: Login to ECR
+      uses: aws-actions/amazon-ecr-login@v1
 
-      - name: Build, tag, and push Docker image to Amazon ECR
-        env:
-          ECR_REGISTRY: 567738737859.dkr.ecr.ap-south-1.amazonaws.com
-          ECR_REPOSITORY: hello-world-app
-          IMAGE_TAG: latest
-        run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+    - name: Build, Tag & Push Docker Image
+      run: |
+        IMAGE_URI=$(terraform output -raw ecr_repository_url)
+        docker build -t hello-world-app ../hello-world-app
+        docker tag hello-world-app:latest $IMAGE_URI:latest
+        docker push $IMAGE_URI:latest
 
-      - name: Download Terraform
-        uses: hashicorp/setup-terraform@v1
-        with:
-          terraform_version: 1.0.0
-
-      - name: Terraform Init
-        run: terraform init
-        working-directory: ./terraform
-
-      - name: Terraform Apply
-        run: terraform apply -auto-approve
-        working-directory: ./terraform
-#for testing purpose
-      - name: Terraform Destroy
-        run: terraform destroy -auto-approve
-        working-directory: ./terraform
+    - name: Deploy ECS with Updated Image
+      working-directory: ./terraform
+      run: terraform apply -auto-approve
