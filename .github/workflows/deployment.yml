@@ -1,0 +1,43 @@
+name: CI/CD Pipeline - ECS Fargate
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ap-south-1
+
+    - name: Terraform Init & Apply
+      working-directory: ./terraform
+      run: |
+        terraform init -backend-config="bucket=my-terraform-state-bucket" \
+                       -backend-config="key=ecs-nodejs-app/terraform.tfstate" \
+                       -backend-config="region=ap-south-1"
+        terraform apply -auto-approve
+
+    - name: Login to ECR
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build, Tag & Push Docker Image
+      run: |
+        IMAGE_URI=$(terraform output -raw ecr_repository_url)
+        docker build -t hello-world-app ../hello-world-app
+        docker tag hello-world-app:latest $IMAGE_URI:latest
+        docker push $IMAGE_URI:latest
+
+    - name: Deploy ECS with Updated Image
+      working-directory: ./terraform
+      run: terraform apply -auto-approve
