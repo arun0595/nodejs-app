@@ -1,4 +1,3 @@
-
 provider "aws" {
   region = var.region
 }
@@ -9,9 +8,11 @@ resource "aws_cloudwatch_log_group" "ecs_log_group" {
 }
 
 resource "aws_ecr_repository" "app_repo" {
-  name                 = var.ecr_repo_name
+  name                 = var.app_name
   image_tag_mutability = "MUTABLE"
-  image_scanning_configuration { scan_on_push = true }
+  image_scanning_configuration { 
+    scan_on_push = true 
+    }
 }
 
 
@@ -33,10 +34,11 @@ resource "aws_iam_role" "ecs_task_execution_role" {
       }
     ]
   })
+}
 
-  managed_policy_arns = [
-    "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-  ]
+resource "aws_iam_role_policy_attachment" "ecs_task_execution_policy" {
+  role       = aws_iam_role.ecs_task_execution_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
 resource "aws_ecs_task_definition" "task" {
@@ -54,7 +56,9 @@ resource "aws_ecs_task_definition" "task" {
       portMappings  = [
         {
           containerPort = 3000
-        } ]
+          protocol      = "tcp"
+        } 
+        ]
         logConfiguration = {
           logDriver = "awslogs"
           options = {
@@ -81,6 +85,14 @@ resource "aws_lb_target_group" "app_target_group" {
   protocol    = "HTTP"
   vpc_id      = var.vpc_id
   target_type = "ip"
+   health_check {
+    path                = "/"
+    interval            = 30
+    timeout             = 5
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    matcher             = "200"
+  }
 }
 
 resource "aws_lb_listener" "app_listener" {
@@ -92,6 +104,7 @@ resource "aws_lb_listener" "app_listener" {
     type             = "forward"
     target_group_arn = aws_lb_target_group.app_target_group.arn
   }
+}
 
 resource "aws_ecs_service" "service" {
   name            = "${var.app_name}-service"
@@ -111,7 +124,6 @@ resource "aws_ecs_service" "service" {
     container_name   = var.app_name
     container_port   = 3000
   }
-}
-depends_on = [aws_lb_listener.app_listener]
 
+  depends_on = [aws_lb_listener.app_listener]
 }
