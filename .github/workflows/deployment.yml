@@ -46,6 +46,11 @@ jobs:
     needs: build-test-analyze
     runs-on: ubuntu-latest
 
+    # defines environments and approvals
+    environment:
+      name: ${{ github.ref_name == 'main' && 'production' || github.ref_name == 'develop' && 'staging' || 'development' }}
+      url: ${{ steps.healthcheck.outputs.app_url }}
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -69,48 +74,4 @@ jobs:
             echo "env=prod" >> $GITHUB_OUTPUT
             echo "ecs_cluster=nodejs-cluster-prod" >> $GITHUB_OUTPUT
             echo "ecs_service=nodejs-service-prod" >> $GITHUB_OUTPUT
-            echo "tf_state_key=ecs-nodejs-app/prod/terraform.tfstate" >> $GITHUB_OUTPUT
-          elif [[ "${GITHUB_REF##*/}" == develop ]]; then
-            echo "env=staging" >> $GITHUB_OUTPUT
-            echo "ecs_cluster=nodejs-cluster-staging" >> $GITHUB_OUTPUT
-            echo "ecs_service=nodejs-service-staging" >> $GITHUB_OUTPUT
-            echo "tf_state_key=ecs-nodejs-app/staging/terraform.tfstate" >> $GITHUB_OUTPUT
-          else
-            echo "env=dev" >> $GITHUB_OUTPUT
-            echo "ecs_cluster=nodejs-cluster-dev" >> $GITHUB_OUTPUT
-            echo "ecs_service=nodejs-service-dev" >> $GITHUB_OUTPUT
-            echo "tf_state_key=ecs-nodejs-app/dev/terraform.tfstate" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Terraform Init & Apply
-        working-directory: ./terraform
-        run: |
-          terraform init -backend-config="bucket=my-terraform-state-bucket" \
-                         -backend-config="key=${{ steps.envsetup.outputs.tf_state_key }}" \
-                         -backend-config="region=${{ env.AWS_REGION }}"
-          terraform apply -auto-approve
-
-      - name: Login to ECR
-        uses: aws-actions/amazon-ecr-login@v1
-
-      - name: Build, Tag & Push Docker Image
-        run: |
-          IMAGE_URI=$(terraform -chdir=terraform output -raw ecr_repository_url)
-          docker build -t nodejs-app .
-          docker tag nodejs-app:latest $IMAGE_URI:${{ steps.envsetup.outputs.env }}
-          docker push $IMAGE_URI:${{ steps.envsetup.outputs.env }}
-
-      - name: Update ECS Service
-        run: |
-          aws ecs update-service \
-            --cluster ${{ steps.envsetup.outputs.ecs_cluster }} \
-            --service ${{ steps.envsetup.outputs.ecs_service }} \
-            --force-new-deployment \
-            --region ${{ env.AWS_REGION }}
-
-      - name: Post-Deployment Health Check
-        run: |
-          ALB_DNS=$(terraform -chdir=terraform output -raw alb_dns_name)
-          echo "Deployed environment: ${{ steps.envsetup.outputs.env }}"
-          echo "Application is accessible at: http://$ALB_DNS"
-          curl -I http://$ALB_DNS || echo "Warning: App might not be ready yet."
+            echo "tf_state_key=ecs-nodejs-app/prod/terraform.tfstate
