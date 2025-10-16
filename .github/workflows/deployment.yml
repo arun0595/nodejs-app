@@ -4,40 +4,96 @@ on:
   push:
     branches:
       - main
+  pull_request:
 
 jobs:
-  deploy:
+  build-test-analyze:
+    name: Build, Test, Analyze
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v2
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ap-south-1
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
 
-    - name: Terraform Init & Apply
-      working-directory: ./terraform
-      run: |
-        terraform init -backend-config="bucket=my-terraform-state-bucket" \
-                       -backend-config="key=ecs-nodejs-app/terraform.tfstate" \
-                       -backend-config="region=ap-south-1"
-        terraform apply -auto-approve
+      - name: Install dependencies
+        run: npm ci
 
-    - name: Login to ECR
-      uses: aws-actions/amazon-ecr-login@v1
+      - name: Run Unit Tests
+        run: npm test
 
-    - name: Build, Tag & Push Docker Image
-      run: |
-        IMAGE_URI=$(terraform output -raw ecr_repository_url)
-        docker build -t hello-world-app ../hello-world-app
-        docker tag hello-world-app:latest $IMAGE_URI:latest
-        docker push $IMAGE_URI:latest
+      - name: Static Code Analysis (CodeQL)
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:javascript"
 
-    - name: Deploy ECS with Updated Image
-      working-directory: ./terraform
-      run: terraform apply -auto-approve
+      - name: Archive Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nodejs-app-artifacts
+          path: .
+
+  deploy:
+    name: Deploy to AWS ECS Fargate
+    needs: build-test-analyze
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: nodejs-app-artifacts
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+
+      # Terraform initialization & apply
+      - name: Terraform Init & Apply
+        working-directory: ./terraform
+        run: |
+          terraform init -backend-config="bucket=my-terraform-state-bucket" \
+                         -backend-config="key=ecs-nodejs-app/terraform.tfstate" \
+                         -backend-config="region=ap-south-1"
+          terraform apply -auto-approve
+
+      # Login to Amazon ECR
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v1
+
+      # Build, Tag & Push Docker Image
+      - name: Build, Tag & Push Docker Image
+        run: |
+          IMAGE_URI=$(terraform -chdir=terraform output -raw ecr_repository_url)
+          docker build -t nodejs-app .
+          docker tag nodejs-app:latest $IMAGE_URI:latest
+          docker push $IMAGE_URI:latest
+
+      # Deploy to ECS (Force New Deployment)
+      - name: Deploy ECS with Updated Image
+        working-directory: ./terraform
+        run: |
+          terraform apply -auto-approve
+          echo "Updating ECS Service..."
+          aws ecs update-service \
+            --cluster nodejs-cluster \
+            --service nodejs-service \
+            --force-new-deployment \
+            --region ap-south-1
+
+      # Post-Deployment Health Check
+      - name: Verify Application Health
+        run: |
+          ALB_DNS=$(terraform -chdir=terraform output -raw alb_dns_name)
+          echo "Application is accessible at: http://$ALB_DNS"
+          curl -I http://$ALB_DNS || echo "Warning: App might not be ready yet."
