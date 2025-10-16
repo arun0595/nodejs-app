@@ -1,10 +1,14 @@
-name: CI/CD Pipeline - ECS Fargate
+name: Multi-Environment CI/CD - ECS Fargate
 
 on:
   push:
     branches:
       - main
-  pull_request:
+      - develop
+      - 'feature/*'
+
+env:
+  AWS_REGION: ap-south-1
 
 jobs:
   build-test-analyze:
@@ -56,44 +60,57 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ap-south-1
+          aws-region: ${{ env.AWS_REGION }}
 
-      # Terraform initialization & apply
+      - name: Set Environment Variables
+        id: envsetup
+        run: |
+          if [[ "${GITHUB_REF##*/}" == main ]]; then
+            echo "env=prod" >> $GITHUB_OUTPUT
+            echo "ecs_cluster=nodejs-cluster-prod" >> $GITHUB_OUTPUT
+            echo "ecs_service=nodejs-service-prod" >> $GITHUB_OUTPUT
+            echo "tf_state_key=ecs-nodejs-app/prod/terraform.tfstate" >> $GITHUB_OUTPUT
+          elif [[ "${GITHUB_REF##*/}" == develop ]]; then
+            echo "env=staging" >> $GITHUB_OUTPUT
+            echo "ecs_cluster=nodejs-cluster-staging" >> $GITHUB_OUTPUT
+            echo "ecs_service=nodejs-service-staging" >> $GITHUB_OUTPUT
+            echo "tf_state_key=ecs-nodejs-app/staging/terraform.tfstate" >> $GITHUB_OUTPUT
+          else
+            echo "env=dev" >> $GITHUB_OUTPUT
+            echo "ecs_cluster=nodejs-cluster-dev" >> $GITHUB_OUTPUT
+            echo "ecs_service=nodejs-service-dev" >> $GITHUB_OUTPUT
+            echo "tf_state_key=ecs-nodejs-app/dev/terraform.tfstate" >> $GITHUB_OUTPUT
+          fi
+
       - name: Terraform Init & Apply
         working-directory: ./terraform
         run: |
           terraform init -backend-config="bucket=my-terraform-state-bucket" \
-                         -backend-config="key=ecs-nodejs-app/terraform.tfstate" \
-                         -backend-config="region=ap-south-1"
+                         -backend-config="key=${{ steps.envsetup.outputs.tf_state_key }}" \
+                         -backend-config="region=${{ env.AWS_REGION }}"
           terraform apply -auto-approve
 
-      # Login to Amazon ECR
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v1
 
-      # Build, Tag & Push Docker Image
       - name: Build, Tag & Push Docker Image
         run: |
           IMAGE_URI=$(terraform -chdir=terraform output -raw ecr_repository_url)
           docker build -t nodejs-app .
-          docker tag nodejs-app:latest $IMAGE_URI:latest
-          docker push $IMAGE_URI:latest
+          docker tag nodejs-app:latest $IMAGE_URI:${{ steps.envsetup.outputs.env }}
+          docker push $IMAGE_URI:${{ steps.envsetup.outputs.env }}
 
-      # Deploy to ECS (Force New Deployment)
-      - name: Deploy ECS with Updated Image
-        working-directory: ./terraform
+      - name: Update ECS Service
         run: |
-          terraform apply -auto-approve
-          echo "Updating ECS Service..."
           aws ecs update-service \
-            --cluster nodejs-cluster \
-            --service nodejs-service \
+            --cluster ${{ steps.envsetup.outputs.ecs_cluster }} \
+            --service ${{ steps.envsetup.outputs.ecs_service }} \
             --force-new-deployment \
-            --region ap-south-1
+            --region ${{ env.AWS_REGION }}
 
-      # Post-Deployment Health Check
-      - name: Verify Application Health
+      - name: Post-Deployment Health Check
         run: |
           ALB_DNS=$(terraform -chdir=terraform output -raw alb_dns_name)
+          echo "Deployed environment: ${{ steps.envsetup.outputs.env }}"
           echo "Application is accessible at: http://$ALB_DNS"
           curl -I http://$ALB_DNS || echo "Warning: App might not be ready yet."
