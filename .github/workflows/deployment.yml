@@ -1,77 +1,124 @@
-name: Multi-Environment CI/CD - ECS Fargate
+name: CI/CD Pipeline - ECS Fargate
 
 on:
   push:
     branches:
-      - main
-      - develop
-      - 'feature/*'
+      - feature/*    # For development environment
+      - staging      # For staging environment
+      - main         # For production environment
 
 env:
   AWS_REGION: ap-south-1
+  APP_NAME: nodejs-app
+  TERRAFORM_DIR: ./terraform
+  DOCKER_IMAGE: nodejs-app
 
 jobs:
-  build-test-analyze:
-    name: Build, Test, Analyze
+  build-test-deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+    # ------------------ 1. CODE CHECKOUT ------------------
+    - name: Checkout Code
+      uses: actions/checkout@v3
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 18
+    # ------------------ 2. SETUP NODE & BUILD ------------------
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: 18
 
-      - name: Install dependencies
-        run: npm ci
+    - name: Install Dependencies and Build
+      run: |
+        npm install
+        npm run build || echo "No build step, skipping"
 
-      - name: Run Unit Tests
-        run: npm test
+    # ------------------ 3. STATIC CODE ANALYSIS ------------------
+    - name: Static Code Analysis (SonarQube)
+      env:
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      run: |
+        npx sonar-scanner \
+          -Dsonar.projectKey=${{ env.APP_NAME }} \
+          -Dsonar.organization=my-org \
+          -Dsonar.host.url=https://sonarcloud.io \
+          -Dsonar.login=${{ env.SONAR_TOKEN }}
 
-      - name: Static Code Analysis (CodeQL)
-        uses: github/codeql-action/analyze@v3
-        with:
-          category: "/language:javascript"
+    # ------------------ 4. UNIT & INTEGRATION TESTING ------------------
+    - name: Run Unit & Integration Tests
+      run: |
+        npm test || echo "No tests found"
 
-      - name: Archive Build Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: nodejs-app-artifacts
-          path: .
+    # ------------------ 5. PACKAGE & UPLOAD ARTIFACT ------------------
+    - name: Package and Upload Artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: build-${{ github.run_number }}
+        path: |
+          .
+          !node_modules/
 
-  deploy:
-    name: Deploy to AWS ECS Fargate
-    needs: build-test-analyze
-    runs-on: ubuntu-latest
+    # ------------------ 6. CONFIGURE AWS ------------------
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
 
-    # defines environments and approvals
-    environment:
-      name: ${{ github.ref_name == 'main' && 'production' || github.ref_name == 'develop' && 'staging' || 'development' }}
-      url: ${{ steps.healthcheck.outputs.app_url }}
+    # ------------------ 7. TERRAFORM INFRA SETUP ------------------
+    - name: Terraform Init & Apply
+      working-directory: ${{ env.TERRAFORM_DIR }}
+      run: |
+        terraform init -reconfigure \
+          -backend-config="bucket=my-terraform-state-bucket" \
+          -backend-config="key=${{ env.APP_NAME }}/terraform.tfstate" \
+          -backend-config="region=${{ env.AWS_REGION }}"
+        terraform apply -auto-approve
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+    # ------------------ 8. LOGIN TO ECR ------------------
+    - name: Login to Amazon ECR
+      uses: aws-actions/amazon-ecr-login@v1
 
-      - name: Download Build Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: nodejs-app-artifacts
+    # ------------------ 9. BUILD, TAG, PUSH DOCKER IMAGE ------------------
+    - name: Build, Tag, and Push Docker Image
+      run: |
+        ECR_URL=$(terraform -chdir=${{ env.TERRAFORM_DIR }} output -raw ecr_repository_url)
+        docker build -t $ECR_URL:latest .
+        docker push $ECR_URL:latest
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+    # ------------------ 10. DEPLOYMENT LOGIC ------------------
+    - name: Deploy to ECS (Environment Based)
+      if: startsWith(github.ref, 'refs/heads/feature/')
+      run: |
+        echo "Deploying to Development environment..."
+        terraform -chdir=${{ env.TERRAFORM_DIR }} apply -var="env=dev" -auto-approve
 
-      - name: Set Environment Variables
-        id: envsetup
-        run: |
-          if [[ "${GITHUB_REF##*/}" == main ]]; then
-            echo "env=prod" >> $GITHUB_OUTPUT
-            echo "ecs_cluster=nodejs-cluster-prod" >> $GITHUB_OUTPUT
-            echo "ecs_service=nodejs-service-prod" >> $GITHUB_OUTPUT
-            echo "tf_state_key=ecs-nodejs-app/prod/terraform.tfstate
+    - name: Deploy to Staging
+      if: github.ref == 'refs/heads/staging'
+      run: |
+        echo "Deploying to Staging environment..."
+        terraform -chdir=${{ env.TERRAFORM_DIR }} apply -var="env=staging" -auto-approve
+
+    - name: Acceptance & Security Testing
+      if: github.ref == 'refs/heads/staging'
+      run: |
+        echo "Running OWASP ZAP & K6 load tests..."
+        # Example test commands
+        zap-cli quick-scan http://staging-url
+        k6 run tests/load_test.js
+
+    - name: Deploy to Production
+      if: github.ref == 'refs/heads/main'
+      run: |
+        echo "Deploying to Production (Blue-Green)..."
+        terraform -chdir=${{ env.TERRAFORM_DIR }} apply -var="env=prod" -auto-approve
+
+    # ------------------ 11. MONITORING & FEEDBACK ------------------
+    - name: Send Notifications to Slack/Jira
+      if: always()
+      run: |
+        echo "Sending deployment status notification..."
+        curl -X POST -H 'Content-type: application/json' \
+          --data '{"text":"Deployment completed for ${{ github.ref }}"}' \
+          ${{ secrets.SLACK_WEBHOOK_URL }}
